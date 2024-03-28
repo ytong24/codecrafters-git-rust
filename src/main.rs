@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 pub(crate) mod commands;
+pub(crate) mod objects;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -28,6 +29,12 @@ enum Command {
 
         file_path: PathBuf,
     },
+    LsTree {
+        #[clap(long)]
+        name_only: bool,
+
+        tree_hash: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -52,6 +59,10 @@ fn main() -> anyhow::Result<()> {
             write_object,
             file_path,
         } => commands::hash_object::invoke(write_object, &file_path)?,
+        Command::LsTree {
+            name_only,
+            tree_hash,
+        } => commands::ls_tree::invoke(name_only, &tree_hash)?,
     }
     Ok(())
 }
