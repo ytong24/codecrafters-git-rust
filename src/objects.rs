@@ -1,11 +1,12 @@
+use anyhow::Context;
 use core::fmt;
+use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use sha1::{Digest, Sha1};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
+    path::Path,
 };
-
-use anyhow::Context;
-use flate2::read::ZlibDecoder;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -31,6 +32,21 @@ pub(crate) struct Object<R> {
 }
 
 impl Object<()> {
+    pub(crate) fn blob_from_file(file_path: impl AsRef<Path>) -> anyhow::Result<Object<impl Read>> {
+        // get the file stat through metadata before read the content
+        let file_path = file_path.as_ref();
+        let stat =
+            fs::metadata(&file_path).with_context(|| format!("stat {}", file_path.display()))?;
+
+        let file = fs::File::open(&file_path).context("open the file to calculate SHA 1")?;
+
+        Ok(Object {
+            kind: Kind::Blob,
+            expected_size: stat.len(),
+            reader: file,
+        })
+    }
+
     pub(crate) fn read(object_hash: &str) -> anyhow::Result<Object<impl BufRead>> {
         // read the file
         let f = fs::File::open(format!(
@@ -75,5 +91,74 @@ impl Object<()> {
             expected_size: size,
             reader: z,
         })
+    }
+}
+
+impl<R> Object<R>
+where
+    R: Read,
+{
+    pub(crate) fn write(mut self, writer: impl Write) -> anyhow::Result<[u8; 20]> {
+        // use Zlib encoder and Sha1 hasher to create BlobWriter
+        let z = ZlibEncoder::new(writer, Compression::default());
+        let mut writer = HashWriter {
+            writer: z,
+            hasher: Sha1::new(),
+        };
+
+        // encode header
+        let header = format!("{} {}\0", self.kind, self.expected_size);
+        write!(writer, "{}", &header)?;
+
+        // encode content
+        std::io::copy(&mut self.reader, &mut writer).context("stream file into blob")?; // don't need to read the file content into a buffer. io copy is enough
+
+        let _ = writer
+            .writer
+            .finish()
+            .context("compress header and file content")?;
+        let hash_value = writer.hasher.finalize();
+
+        Ok(hash_value.into())
+    }
+
+    pub(crate) fn write_to_object(self) -> anyhow::Result<[u8; 20]> {
+        // compress the blob object and write to the file
+        let tmp_file = "temp";
+        let hash_value = self
+            .write(fs::File::create(&tmp_file).context("create temporary file for blob")?)
+            .context("write blob to file")?;
+
+        let hash_hex = hex::encode(&hash_value);
+
+        fs::create_dir_all(format!(".git/objects/{}", &hash_hex[..2]))
+            .context("create subdir for .git/objects")?;
+        fs::rename(
+            &tmp_file,
+            format!(".git/objects/{}/{}", &hash_hex[..2], &hash_hex[2..]),
+        )
+        .context("move temp blob file into .git/objects")?;
+
+        Ok(hash_value)
+    }
+}
+
+// encapsulate the compressed content writer and the hash writer into the same writer to avoid duplicate code
+struct HashWriter<W> {
+    writer: W,
+    hasher: Sha1,
+}
+
+impl<W> Write for HashWriter<W>
+where
+    W: Write,
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writer.write(buf)?;
+        self.hasher.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
     }
 }
