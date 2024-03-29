@@ -27,7 +27,7 @@ pub(crate) fn invoke(
     )?;
 
     writeln!(commit, "")?;
-    write!(commit, "{message}")?;
+    writeln!(commit, "{message}")?;
 
     let hash_value = Object {
         kind: Kind::Commit,
